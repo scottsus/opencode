@@ -37,13 +37,20 @@ const start: Plugin = async () => {
   const SdkTraceNode = await import("@opentelemetry/sdk-trace-node")
   const Otlp = await import("@opentelemetry/exporter-trace-otlp-http")
 
+  // Diagnostic: log what global TracerProvider is currently registered.
+  const existing = trace.getTracerProvider()
+  const existingTag =
+    existing instanceof ProxyTracerProvider
+      ? `ProxyTracerProvider(delegate=${existing.getDelegate()?.constructor?.name ?? "Noop"})`
+      : (existing.constructor?.name ?? "unknown")
+  console.log(`[starfleet-otel] before register: global TracerProvider = ${existingTag}, endpoint=${endpoint}`)
+
   // If something already registered a real (non-noop) global provider, do
   // nothing. Effect's `@effect/opentelemetry` does NOT call register() (see
   // its NodeSdk.ts:layerTracerProvider — it constructs a NodeTracerProvider
   // and holds it in the Effect Context, never registering globally), so in
   // the normal opencode boot the global is still the noop ProxyTracerProvider
   // and we install a real provider here.
-  const existing = trace.getTracerProvider()
   if (existing instanceof ProxyTracerProvider) {
     const delegate = existing.getDelegate()
     // ProxyTracerProvider holds a delegate; if it's already a real provider
@@ -52,12 +59,14 @@ const start: Plugin = async () => {
       delegate instanceof SdkTraceNode.NodeTracerProvider ||
       delegate instanceof SdkTraceBase.BasicTracerProvider
     ) {
+      console.log(`[starfleet-otel] global already has a real delegate, skipping registration`)
       return {}
     }
   } else if (
     existing instanceof SdkTraceNode.NodeTracerProvider ||
     existing instanceof SdkTraceBase.BasicTracerProvider
   ) {
+    console.log(`[starfleet-otel] global is already a real provider, skipping registration`)
     return {}
   }
 
@@ -71,6 +80,7 @@ const start: Plugin = async () => {
     ],
   })
   provider.register()
+  console.log(`[starfleet-otel] registered NodeTracerProvider as global, exporting to ${endpoint}/v1/traces`)
 
   const shutdown = () => {
     provider
