@@ -4,25 +4,32 @@ import { Effect } from "effect"
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
 
 // Extracts a W3C distributed trace context (traceparent / tracestate) from
-// the incoming HTTP headers and continues it as the parent of the Effect
-// span tree for the rest of the request pipeline.
+// the incoming HTTP headers and attaches it as the Effect parent span for
+// the rest of the request pipeline. `OtelTracer.withSpanContext(effect,
+// sc)` is `Effect.withParentSpan(effect, makeExternalSpan(sc))`, so
+// `Effect.fn(...)` and `Effect.withSpan` calls inside the route handler
+// inherit `sc` as their parent.
 //
-// Implementation note: this stays on the same fiber as the rest of the
-// route pipeline so the OTEL-aware Tracer installed by
-// `Observability.layer` remains the active tracer. Bridging through
-// `Effect.runPromiseExit` (an earlier mistake) spawns a fresh top-level
-// fiber whose default tracer is the no-op `NativeSpan`, which silently
-// drops every span instead of exporting it.
+// NOTE (2026-05-21): in this codebase the framework's
+// `HttpMiddleware.tracer` (effect/unstable/http/HttpMiddleware.ts) already
+// parses W3C `traceparent` headers natively and creates a "POST /…" server
+// span as a child of the upstream span. So setting `Tracer.ParentSpan`
+// here is redundant for the synchronous portion of the request — but it
+// also doesn't hurt, and we keep it as a belt-and-suspenders measure.
 //
-// `OtelTracer.withSpanContext` is just `Effect.withParentSpan(self,
-// makeExternalSpan(spanContext))`, so `Effect.fn(...)` and
-// `Effect.withSpan` calls inside the handler — and, transitively, the AI
-// SDK's `streamText` spans created via the OTEL tracer — inherit the
-// upstream span as their parent.
+// Stitching beyond the synchronous handler (i.e. into the long-lived
+// per-instance scopes where SessionPrompt.run / LLM.run / ai.streamText
+// actually execute) is NOT achieved by this middleware alone. opencode
+// forks per-request work into shared `InstanceState` scopes whose own
+// span lineage was captured at server bootstrap, so spans created by
+// background fibers are children of a long-lived "phantom" bootstrap span
+// that's never exported, not of the upstream span. Genuine end-to-end
+// stitching would require stripping `Tracer.ParentSpan` (or rerooting
+// from `request.headers["traceparent"]`) at the boundary where work
+// crosses into those long-lived scopes.
 //
 // A `x-trace-continued: <traceId>` response header is added when the
-// middleware successfully continued an upstream trace, as a debugging aid
-// for callers (e.g. Tesseract) verifying end-to-end stitching.
+// middleware extracted an upstream trace context, as a debugging aid.
 export const traceContextLayer = HttpRouter.middleware<{ handles: unknown }>()((effect) =>
   Effect.gen(function* () {
     const request = yield* HttpServerRequest.HttpServerRequest
@@ -44,33 +51,7 @@ export const traceContextLayer = HttpRouter.middleware<{ handles: unknown }>()((
       return yield* effect
     }
 
-    console.log(
-      `[trace-context] continuing trace_id=${sc.traceId} span_id=${sc.spanId} url=${request.url}`,
-    )
-
-    // Inspect fiber's current ParentSpan BEFORE we wrap
-    const before = yield* Effect.gen(function* () {
-      const ctx = yield* Effect.context()
-      const parent = ctx.mapUnsafe.get("effect/Tracer/ParentSpan") as any
-      const tracer = ctx.mapUnsafe.get("effect/Tracer/Tracer") as any
-      return {
-        parentSpan: parent ? `${parent._tag}/trace=${parent.traceId}/span=${parent.spanId}` : "none",
-        tracer: tracer ? typeof tracer.span : "none",
-      }
-    })
-    console.log(`[trace-context] BEFORE_WRAP: ${JSON.stringify(before)}`)
-
-    const result = yield* OtelTracer.withSpanContext(effect, sc).pipe(
-      Effect.tap(() =>
-        Effect.gen(function* () {
-          const ctx = yield* Effect.context()
-          const parent = ctx.mapUnsafe.get("effect/Tracer/ParentSpan") as any
-          console.log(
-            `[trace-context] INSIDE_WRAPPED: parentSpan=${parent ? `${parent._tag}/trace=${parent.traceId}/span=${parent.spanId}` : "none"}`,
-          )
-        }),
-      ),
-    )
+    const result = yield* OtelTracer.withSpanContext(effect, sc)
     if (HttpServerResponse.isHttpServerResponse(result)) {
       return HttpServerResponse.setHeader(result, "x-trace-continued", sc.traceId)
     }
