@@ -1,7 +1,7 @@
 import { context as otelContext, propagation, ROOT_CONTEXT, trace as otelTrace } from "@opentelemetry/api"
 import * as OtelTracer from "@effect/opentelemetry/Tracer"
 import { Effect, Layer } from "effect"
-import { HttpRouter, HttpServerRequest } from "effect/unstable/http"
+import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
 
 // Extracts a W3C distributed trace context (traceparent / tracestate) from
 // the incoming HTTP headers and continues it as the parent of the Effect
@@ -32,14 +32,22 @@ export const traceContextLayer = HttpRouter.middleware<{ handles: unknown }>()((
 
     const span = otelTrace.getSpan(extracted)
     const sc = span?.spanContext()
-    if (!sc || !sc.traceId || sc.traceId === "00000000000000000000000000000000") {
+    const valid = sc && sc.traceId && sc.traceId !== "00000000000000000000000000000000"
+
+    console.log(
+      `[trace-context] url=${request.url} valid=${valid ? "yes" : "no"} trace_id=${sc?.traceId ?? "none"}`,
+    )
+
+    if (!valid) {
       return yield* effect
     }
 
-    console.log(
-      `[trace-context] continuing trace_id=${sc.traceId} span_id=${sc.spanId} url=${request.url}`,
-    )
-
-    return yield* OtelTracer.withSpanContext(effect, sc) as Effect.Effect<unknown, unknown, unknown>
+    const wrapped = OtelTracer.withSpanContext(effect, sc) as Effect.Effect<unknown, unknown, unknown>
+    const result = yield* wrapped
+    // Add a marker header so we can verify this middleware ran end-to-end.
+    if (HttpServerResponse.isHttpServerResponse(result)) {
+      return HttpServerResponse.setHeader(result, "x-trace-continued", sc.traceId) as never
+    }
+    return result as never
   }) as any,
 ).layer as unknown as Layer.Layer<never, never, never>
