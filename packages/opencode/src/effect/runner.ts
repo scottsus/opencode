@@ -1,4 +1,5 @@
-import { Cause, Deferred, Effect, Exit, Fiber, Latch, Schema, Scope, SynchronizedRef } from "effect"
+import { Cause, Deferred, Effect, Exit, Fiber, Latch, Schema, Scope, SynchronizedRef, Tracer } from "effect"
+import * as Option from "effect/Option"
 
 export interface Runner<A, E = never> {
   readonly state: State<A, E>
@@ -83,7 +84,19 @@ export const make = <A, E = never>(
   const startRun = (work: Effect.Effect<A, E>, done: Deferred.Deferred<A, E | Cancelled>) =>
     Effect.gen(function* () {
       const id = next()
+      // Capture the per-request `Tracer.ParentSpan` BEFORE forking into
+      // the long-lived runner scope. Without this, the forked work runs
+      // with whatever ParentSpan was on the fiber when this scope was
+      // first opened (typically `InstanceBootstrap` at server boot), so
+      // every span downstream — `SessionPrompt.run`, `LLM.run`, the AI
+      // SDK's `streamText` spans — gets re-rooted onto the bootstrap
+      // span instead of the upstream HTTP request.
+      const currentParent = yield* Effect.serviceOption(Tracer.ParentSpan)
       const fiber = yield* work.pipe(
+        Option.match(currentParent, {
+          onNone: () => <X>(eff: X) => eff,
+          onSome: (span) => Effect.withParentSpan(span),
+        }),
         Effect.onExit((exit) => finishRun(id, done, exit)),
         Effect.forkIn(scope),
       )
