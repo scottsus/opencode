@@ -48,7 +48,29 @@ export const traceContextLayer = HttpRouter.middleware<{ handles: unknown }>()((
       `[trace-context] continuing trace_id=${sc.traceId} span_id=${sc.spanId} url=${request.url}`,
     )
 
-    const result = yield* OtelTracer.withSpanContext(effect, sc)
+    // Inspect fiber's current ParentSpan BEFORE we wrap
+    const before = yield* Effect.gen(function* () {
+      const ctx = yield* Effect.context()
+      const parent = ctx.mapUnsafe.get("effect/Tracer/ParentSpan") as any
+      const tracer = ctx.mapUnsafe.get("effect/Tracer/Tracer") as any
+      return {
+        parentSpan: parent ? `${parent._tag}/trace=${parent.traceId}/span=${parent.spanId}` : "none",
+        tracer: tracer ? typeof tracer.span : "none",
+      }
+    })
+    console.log(`[trace-context] BEFORE_WRAP: ${JSON.stringify(before)}`)
+
+    const result = yield* OtelTracer.withSpanContext(effect, sc).pipe(
+      Effect.tap(() =>
+        Effect.gen(function* () {
+          const ctx = yield* Effect.context()
+          const parent = ctx.mapUnsafe.get("effect/Tracer/ParentSpan") as any
+          console.log(
+            `[trace-context] INSIDE_WRAPPED: parentSpan=${parent ? `${parent._tag}/trace=${parent.traceId}/span=${parent.spanId}` : "none"}`,
+          )
+        }),
+      ),
+    )
     if (HttpServerResponse.isHttpServerResponse(result)) {
       return HttpServerResponse.setHeader(result, "x-trace-continued", sc.traceId)
     }
