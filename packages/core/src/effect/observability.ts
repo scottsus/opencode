@@ -87,6 +87,7 @@ const traces = async () => {
   // Register a W3C trace-context propagator so incoming `traceparent`
   // headers can be extracted and continued by upstream HTTP middleware.
   propagation.setGlobalPropagator(new W3CTraceContextPropagator())
+  console.log("[observability] AsyncLocalStorageContextManager + W3CTraceContextPropagator registered")
 
   return NodeSdk.layer(() => ({
     resource: resource(),

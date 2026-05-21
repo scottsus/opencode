@@ -1,18 +1,19 @@
 import { context as otelContext, propagation, ROOT_CONTEXT, trace as otelTrace } from "@opentelemetry/api"
-import { Effect, Exit, Layer } from "effect"
+import * as OtelTracer from "@effect/opentelemetry/Tracer"
+import { Effect, Layer } from "effect"
 import { HttpRouter, HttpServerRequest } from "effect/unstable/http"
 
 // Extracts a W3C distributed trace context (traceparent / tracestate) from
-// the incoming HTTP headers and continues it as the active OpenTelemetry
-// context for the rest of the request pipeline. Downstream Effect spans
+// the incoming HTTP headers and continues it as the parent of the Effect
+// span tree for the rest of the request pipeline. Downstream Effect spans
 // (including AI SDK calls) inherit the upstream span as their parent so
 // traces stitch end-to-end across services.
 //
-// The extracted context is bound for the inner effect by entering an
-// `otelContext.with` scope around the synchronous `Effect.runPromiseExit`
-// call. The global `AsyncLocalStorageContextManager` registered in
-// `core/effect/observability.ts` propagates the bound OTEL context through
-// every `await` boundary inside the inner effect's fiber.
+// This uses `OtelTracer.withSpanContext` (which calls
+// `Effect.withParentSpan(makeExternalSpan(...))`) to attach an external
+// parent span to the inner effect. Effect's tracer then walks the parent
+// chain when creating new spans, picking up the upstream `traceId` and
+// `spanId`.
 export const traceContextLayer = HttpRouter.middleware<{ handles: unknown }>()((effect) =>
   Effect.gen(function* () {
     const request = yield* HttpServerRequest.HttpServerRequest
@@ -31,28 +32,14 @@ export const traceContextLayer = HttpRouter.middleware<{ handles: unknown }>()((
 
     const span = otelTrace.getSpan(extracted)
     const sc = span?.spanContext()
+    if (!sc || !sc.traceId || sc.traceId === "00000000000000000000000000000000") {
+      return yield* effect
+    }
+
     console.log(
-      `[trace-context] traceparent=${headers["traceparent"] ?? "none"} extracted_trace_id=${sc?.traceId ?? "none"} span_id=${sc?.spanId ?? "none"} url=${request.url}`,
+      `[trace-context] continuing trace_id=${sc.traceId} span_id=${sc.spanId} url=${request.url}`,
     )
 
-    const ctx = yield* Effect.context()
-    const bridged = Effect.callback<unknown, unknown>((resume) => {
-      otelContext.with(extracted, () => {
-        // Log INSIDE with-block, before async work
-        const beforeSpan = otelTrace.getSpan(otelContext.active())
-        console.log(
-          `[trace-context] BEFORE_RUN: active_trace=${beforeSpan?.spanContext().traceId ?? "none"} active_span=${beforeSpan?.spanContext().spanId ?? "none"}`,
-        )
-        const provided = (effect as any).pipe(Effect.provide(ctx as any))
-        Effect.runPromiseExit(provided as Effect.Effect<unknown, unknown, never>).then((exit) => {
-          const afterSpan = otelTrace.getSpan(otelContext.active())
-          console.log(
-            `[trace-context] AFTER_RUN: active_trace=${afterSpan?.spanContext().traceId ?? "none"} active_span=${afterSpan?.spanContext().spanId ?? "none"}`,
-          )
-          resume(Exit.isSuccess(exit) ? Effect.succeed(exit.value) : Effect.failCause(exit.cause))
-        })
-      })
-    })
-    return (yield* (bridged as any)) as never
+    return yield* OtelTracer.withSpanContext(effect, sc) as Effect.Effect<unknown, unknown, unknown>
   }) as any,
 ).layer as unknown as Layer.Layer<never, never, never>
