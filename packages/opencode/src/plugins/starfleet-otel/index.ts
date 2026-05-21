@@ -3,19 +3,22 @@
 // Why this exists
 // ---------------
 // `@devtheops/opencode-plugin-otel` calls `trace.setGlobalTracerProvider(provider)`
-// at startup, REPLACING any TracerProvider that was already registered. That
-// breaks Effect's `@effect/opentelemetry` machinery: Effect's per-request HTTP
-// server spans (the ones created by `effect/unstable/http/HttpMiddleware.tracer`)
-// stop reaching the OTLP exporter, so Jaeger never sees them and downstream
-// trace stitching falls apart.
+// at startup, replacing whatever's there. It also pulls in a heavy bundle
+// (~50K LOC, AI SDK metric instrumentation, session/message span collation)
+// that we don't need for trace export.
 //
 // What this does instead
 // ----------------------
 // We install a `NodeTracerProvider` for the AI SDK and other raw
 // `@opentelemetry/api` consumers, but we DO NOT clobber an already-registered
-// provider. If one is already set we leave it alone. Either way, Effect's
-// internal `OtelTracerProvider` (held in the Effect Context, with its own
-// BatchSpanProcessor → OTLP) keeps exporting Effect spans untouched.
+// provider. If one is already set we leave it alone.
+//
+// Effect's `@effect/opentelemetry` does NOT call `provider.register()` on its
+// internal NodeTracerProvider — it holds it inside the Effect Context,
+// separate from the global. That's by design (Effect spans use the Effect
+// `Tracer.Tracer` ref, not the global), but it means non-Effect consumers
+// like the Vercel AI SDK see only the no-op `ProxyTracerProvider` unless
+// something else registers a real one. This plugin does that, minimally.
 //
 // Endpoint resolution: prefer `OPENCODE_OTLP_ENDPOINT` (Tesseract sets this
 // alongside `OTEL_EXPORTER_OTLP_ENDPOINT` to disambiguate from any user OTEL
@@ -37,36 +40,20 @@ const start: Plugin = async () => {
   const SdkTraceNode = await import("@opentelemetry/sdk-trace-node")
   const Otlp = await import("@opentelemetry/exporter-trace-otlp-http")
 
-  // Diagnostic: log what global TracerProvider is currently registered.
+  // If a real (non-noop) global provider is already registered, do nothing.
   const existing = trace.getTracerProvider()
-  const existingTag =
-    existing instanceof ProxyTracerProvider
-      ? `ProxyTracerProvider(delegate=${existing.getDelegate()?.constructor?.name ?? "Noop"})`
-      : (existing.constructor?.name ?? "unknown")
-  console.log(`[starfleet-otel] before register: global TracerProvider = ${existingTag}, endpoint=${endpoint}`)
-
-  // If something already registered a real (non-noop) global provider, do
-  // nothing. Effect's `@effect/opentelemetry` does NOT call register() (see
-  // its NodeSdk.ts:layerTracerProvider — it constructs a NodeTracerProvider
-  // and holds it in the Effect Context, never registering globally), so in
-  // the normal opencode boot the global is still the noop ProxyTracerProvider
-  // and we install a real provider here.
   if (existing instanceof ProxyTracerProvider) {
     const delegate = existing.getDelegate()
-    // ProxyTracerProvider holds a delegate; if it's already a real provider
-    // someone else installed, leave it alone.
     if (
       delegate instanceof SdkTraceNode.NodeTracerProvider ||
       delegate instanceof SdkTraceBase.BasicTracerProvider
     ) {
-      console.log(`[starfleet-otel] global already has a real delegate, skipping registration`)
       return {}
     }
   } else if (
     existing instanceof SdkTraceNode.NodeTracerProvider ||
     existing instanceof SdkTraceBase.BasicTracerProvider
   ) {
-    console.log(`[starfleet-otel] global is already a real provider, skipping registration`)
     return {}
   }
 
@@ -80,7 +67,6 @@ const start: Plugin = async () => {
     ],
   })
   provider.register()
-  console.log(`[starfleet-otel] registered NodeTracerProvider as global, exporting to ${endpoint}/v1/traces`)
 
   const shutdown = () => {
     provider
@@ -101,4 +87,3 @@ const Plugin: PluginModule = {
 }
 
 export default Plugin
-
