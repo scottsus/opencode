@@ -38,10 +38,19 @@ export const traceContextLayer = HttpRouter.middleware<{ handles: unknown }>()((
     const ctx = yield* Effect.context()
     const bridged = Effect.callback<unknown, unknown>((resume) => {
       otelContext.with(extracted, () => {
-        const provided = (effect as any).pipe(Effect.provide(ctx as any))
-        Effect.runPromiseExit(provided as Effect.Effect<unknown, unknown, never>).then((exit) =>
-          resume(Exit.isSuccess(exit) ? Effect.succeed(exit.value) : Effect.failCause(exit.cause)),
+        // Log INSIDE with-block, before async work
+        const beforeSpan = otelTrace.getSpan(otelContext.active())
+        console.log(
+          `[trace-context] BEFORE_RUN: active_trace=${beforeSpan?.spanContext().traceId ?? "none"} active_span=${beforeSpan?.spanContext().spanId ?? "none"}`,
         )
+        const provided = (effect as any).pipe(Effect.provide(ctx as any))
+        Effect.runPromiseExit(provided as Effect.Effect<unknown, unknown, never>).then((exit) => {
+          const afterSpan = otelTrace.getSpan(otelContext.active())
+          console.log(
+            `[trace-context] AFTER_RUN: active_trace=${afterSpan?.spanContext().traceId ?? "none"} active_span=${afterSpan?.spanContext().spanId ?? "none"}`,
+          )
+          resume(Exit.isSuccess(exit) ? Effect.succeed(exit.value) : Effect.failCause(exit.cause))
+        })
       })
     })
     return (yield* (bridged as any)) as never
