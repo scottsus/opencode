@@ -44,6 +44,10 @@ export const traceContextLayer = HttpRouter.middleware<{ handles: unknown }>()((
       return yield* effect
     }
 
+    console.log(
+      `[trace-context] continuing trace_id=${sc.traceId} span_id=${sc.spanId} url=${request.url}`,
+    )
+
     const result = yield* OtelTracer.withSpanContext(effect, sc)
     if (HttpServerResponse.isHttpServerResponse(result)) {
       return HttpServerResponse.setHeader(result, "x-trace-continued", sc.traceId)
