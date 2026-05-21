@@ -79,10 +79,14 @@ const traces = async () => {
   // parent span - without a real context manager every span starts a
   // new trace. Registering AsyncLocalStorageContextManager fixes this.
   const { AsyncLocalStorageContextManager } = await import("@opentelemetry/context-async-hooks")
-  const { context } = await import("@opentelemetry/api")
+  const { context, propagation } = await import("@opentelemetry/api")
+  const { W3CTraceContextPropagator } = await import("@opentelemetry/core")
   const mgr = new AsyncLocalStorageContextManager()
   mgr.enable()
   context.setGlobalContextManager(mgr)
+  // Register a W3C trace-context propagator so incoming `traceparent`
+  // headers can be extracted and continued by upstream HTTP middleware.
+  propagation.setGlobalPropagator(new W3CTraceContextPropagator())
 
   return NodeSdk.layer(() => ({
     resource: resource(),

@@ -88,6 +88,7 @@ import { corsVaryFix } from "./middleware/cors-vary"
 import { errorLayer } from "./middleware/error"
 import { fenceLayer } from "./middleware/fence"
 import { schemaErrorLayer } from "./middleware/schema-error"
+import { traceContextLayer } from "./middleware/trace-context"
 
 export const context = Context.makeUnsafe<unknown>(new Map())
 
@@ -190,6 +191,7 @@ export function createRoutes(
       compressionLayer,
       corsVaryFix,
       fenceLayer,
+      traceContextLayer,
       cors(corsOptions),
       Account.defaultLayer,
       Agent.defaultLayer,

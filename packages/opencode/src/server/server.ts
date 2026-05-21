@@ -6,6 +6,7 @@ import { ConfigProvider, Context, Effect, Exit, Layer, Scope } from "effect"
 import { HttpRouter, HttpServer } from "effect/unstable/http"
 import { OpenApi } from "effect/unstable/httpapi"
 import { createServer } from "node:http"
+import { context as otelContext, propagation, ROOT_CONTEXT } from "@opentelemetry/api"
 import { MDNS } from "./mdns"
 import { HttpApiApp } from "./routes/instance/httpapi/server"
 import { disposeMiddleware } from "./routes/instance/httpapi/lifecycle"
@@ -55,10 +56,27 @@ class ListenerServerService extends Context.Service<ListenerServerService, Liste
   "@opencode/ListenerServer",
 ) {}
 
+// Continues a W3C distributed trace context (traceparent / tracestate) from
+// the inbound HTTP request before delegating to the Effect-based handler.
+// Combined with the global `AsyncLocalStorageContextManager` registered in
+// `core/effect/observability.ts`, downstream Effect spans inherit
+// `extracted` as their parent so traces stitch end-to-end across services.
+function extractTraceContext(request: Request) {
+  return propagation.extract(ROOT_CONTEXT, request.headers, {
+    get(carrier, key) {
+      return carrier.get(key) ?? undefined
+    },
+    keys(carrier) {
+      return [...carrier.keys()]
+    },
+  })
+}
+
 export const Default = lazy(() => {
   const handler = HttpApiApp.webHandler().handler
   const app: ServerApp = {
-    fetch: (request: Request) => handler(request, HttpApiApp.context),
+    fetch: (request: Request) =>
+      otelContext.with(extractTraceContext(request), () => handler(request, HttpApiApp.context)),
     request(input, init) {
       return app.fetch(input instanceof Request ? input : new Request(new URL(input, "http://localhost"), init))
     },
