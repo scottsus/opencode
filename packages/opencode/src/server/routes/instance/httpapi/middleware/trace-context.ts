@@ -5,9 +5,7 @@ import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstab
 
 // Extracts a W3C distributed trace context (traceparent / tracestate) from
 // the incoming HTTP headers and continues it as the parent of the Effect
-// span tree for the rest of the request pipeline. Downstream Effect spans
-// (including AI SDK calls) inherit the upstream span as their parent so
-// traces stitch end-to-end across services.
+// span tree for the rest of the request pipeline.
 //
 // Two complementary mechanisms keep the upstream context intact:
 //
@@ -18,6 +16,11 @@ import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstab
 //    for the duration of the inner effect's execution, so non-Effect
 //    callers (the AI SDK, raw `tracer.startActiveSpan` calls, etc.) also
 //    pick up the upstream span as the active parent.
+//
+// A `x-trace-continued: <traceId>` response header is added when the
+// middleware successfully continued an upstream trace, mainly as a
+// debugging aid for callers (e.g. Tesseract) verifying end-to-end
+// stitching.
 export const traceContextLayer = HttpRouter.middleware<{ handles: unknown }>()((effect) =>
   Effect.gen(function* () {
     const request = yield* HttpServerRequest.HttpServerRequest
@@ -41,10 +44,6 @@ export const traceContextLayer = HttpRouter.middleware<{ handles: unknown }>()((
     if (!valid) {
       return yield* effect
     }
-
-    console.log(
-      `[trace-context] continuing trace_id=${sc.traceId} span_id=${sc.spanId} url=${request.url}`,
-    )
 
     const wrapped = OtelTracer.withSpanContext(effect as any, sc) as Effect.Effect<unknown, unknown, unknown>
     const ctx = yield* Effect.context()
