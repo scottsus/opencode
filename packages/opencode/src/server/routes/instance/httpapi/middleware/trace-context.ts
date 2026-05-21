@@ -1,4 +1,4 @@
-import { context as otelContext, propagation, ROOT_CONTEXT } from "@opentelemetry/api"
+import { context as otelContext, propagation, ROOT_CONTEXT, trace as otelTrace } from "@opentelemetry/api"
 import { Effect, Exit, Layer } from "effect"
 import { HttpRouter, HttpServerRequest } from "effect/unstable/http"
 
@@ -28,6 +28,12 @@ export const traceContextLayer = HttpRouter.middleware<{ handles: unknown }>()((
         return Object.keys(carrier)
       },
     })
+
+    const span = otelTrace.getSpan(extracted)
+    const sc = span?.spanContext()
+    console.log(
+      `[trace-context] traceparent=${headers["traceparent"] ?? "none"} extracted_trace_id=${sc?.traceId ?? "none"} span_id=${sc?.spanId ?? "none"} url=${request.url}`,
+    )
 
     const ctx = yield* Effect.context()
     const bridged = Effect.callback<unknown, unknown>((resume) => {
