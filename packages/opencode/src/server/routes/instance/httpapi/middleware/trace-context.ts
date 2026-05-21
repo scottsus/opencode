@@ -1,6 +1,6 @@
 import { context as otelContext, propagation, ROOT_CONTEXT, trace as otelTrace } from "@opentelemetry/api"
 import * as OtelTracer from "@effect/opentelemetry/Tracer"
-import { Effect, Layer } from "effect"
+import { Effect, Exit, Layer } from "effect"
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
 
 // Extracts a W3C distributed trace context (traceparent / tracestate) from
@@ -9,11 +9,15 @@ import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstab
 // (including AI SDK calls) inherit the upstream span as their parent so
 // traces stitch end-to-end across services.
 //
-// This uses `OtelTracer.withSpanContext` (which calls
-// `Effect.withParentSpan(makeExternalSpan(...))`) to attach an external
-// parent span to the inner effect. Effect's tracer then walks the parent
-// chain when creating new spans, picking up the upstream `traceId` and
-// `spanId`.
+// Two complementary mechanisms keep the upstream context intact:
+//
+// 1. `OtelTracer.withSpanContext` attaches the upstream span as the Effect
+//    parent span via `Effect.withParentSpan`, so `Effect.fn(...)` and
+//    `Effect.withSpan` calls inside the handler walk back to it.
+// 2. `otelContext.with(extracted, ...)` binds the extracted OTEL context
+//    for the duration of the inner effect's execution, so non-Effect
+//    callers (the AI SDK, raw `tracer.startActiveSpan` calls, etc.) also
+//    pick up the upstream span as the active parent.
 export const traceContextLayer = HttpRouter.middleware<{ handles: unknown }>()((effect) =>
   Effect.gen(function* () {
     const request = yield* HttpServerRequest.HttpServerRequest
@@ -34,17 +38,25 @@ export const traceContextLayer = HttpRouter.middleware<{ handles: unknown }>()((
     const sc = span?.spanContext()
     const valid = sc && sc.traceId && sc.traceId !== "00000000000000000000000000000000"
 
-    console.log(
-      `[trace-context] url=${request.url} valid=${valid ? "yes" : "no"} trace_id=${sc?.traceId ?? "none"}`,
-    )
-
     if (!valid) {
       return yield* effect
     }
 
-    const wrapped = OtelTracer.withSpanContext(effect, sc) as Effect.Effect<unknown, unknown, unknown>
-    const result = yield* wrapped
-    // Add a marker header so we can verify this middleware ran end-to-end.
+    console.log(
+      `[trace-context] continuing trace_id=${sc.traceId} span_id=${sc.spanId} url=${request.url}`,
+    )
+
+    const wrapped = OtelTracer.withSpanContext(effect as any, sc) as Effect.Effect<unknown, unknown, unknown>
+    const ctx = yield* Effect.context()
+    const result = yield* Effect.callback<unknown, unknown>((resume) => {
+      otelContext.with(extracted, () => {
+        const provided = wrapped.pipe(Effect.provide(ctx as any)) as Effect.Effect<unknown, unknown, never>
+        Effect.runPromiseExit(provided).then((exit) =>
+          resume(Exit.isSuccess(exit) ? Effect.succeed(exit.value) : Effect.failCause(exit.cause)),
+        )
+      })
+    })
+
     if (HttpServerResponse.isHttpServerResponse(result)) {
       return HttpServerResponse.setHeader(result, "x-trace-continued", sc.traceId) as never
     }
